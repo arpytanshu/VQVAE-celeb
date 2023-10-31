@@ -14,11 +14,11 @@ import fire
 import torch
 from torch.optim import AdamW
 
-from torch.nn import BCEWithLogitsLoss
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+from matplotlib.patches import Ellipse
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.metrics import classification_report as clf_rpt
 
 from model.VAE import VAEConfig, VAEModel, VAELoss
 from data.celeb_utils import get_dataset
@@ -52,6 +52,7 @@ class TrainingArgs:
     worse_report_counter: int = 0
 
     save_plots: bool = True
+    n_samples_visualize: int = 2048
 
 
 class Trainer:
@@ -124,36 +125,35 @@ class Trainer:
                                        log_var=log_var)
 
             losses['loss'].backward()
-
             self.optimizer.step()
             self.scheduler.step()
 
-
-            train_report = dict(
-                train_loss = round(losses['loss'].detach().item(), 6),
-                train_recon_loss = round(losses['recon_loss'].item(), 6),
-                train_kld = round(losses['kld'].item(), 6),
+            tr_rpt = dict(
+                train_loss = round(losses['loss'].detach().item(), 4),
+                train_recon_loss = round(losses['recon_loss'].item(), 4),
+                train_kld = round(losses['kld'].item(), 4),
                 learning_rate=round(self.optimizer.param_groups[0]['lr'], 6))
 
-            self.write_tensorboard(train_report)
+            self.write_tensorboard(tr_rpt)
             
             # log training stuff
             if (itern % self.args.log_interval) == 0:
-                self.logger.info(f"{itern=} " + str(train_report))
+                self.logger.info(f"{itern=} tr_loss:{tr_rpt['train_loss']} tr_recon_loss:{tr_rpt['train_recon_loss']} tr_kld:{tr_rpt['train_kld']}")
             
             # log evaluation stuff + checkpoint
             if (itern % self.args.eval_iterval) == 0:
                 self.logger.info(f"Running evaluation at {itern=}...")
-                test_report = self.evaluate()
-                self.write_tensorboard(test_report)
-                self.logger.info(str(test_report))
-
-                self.checkpoint_logic(test_report, train_report)
+                te_rpt = self.evaluate()
+                self.write_tensorboard(te_rpt)
+                self.logger.info(f"{itern=} te_loss:{te_rpt['test_loss']} te_recon_loss:{te_rpt['test_recon_loss']} te_kld:{te_rpt['test_kld']} elapsed:{te_rpt['elapsed']}")
+                self.checkpoint_logic(te_rpt, tr_rpt)
 
             # plot stuff
-            # if (self.args.save_plots) and ((itern % self.args.plot_interval) == 0):
-            #     pe_filename = self.checkpoint_path / "plots" / f"pe_sim_{itern}.png"
-            #     self.model.get_pe_similarity_plot(f"iter:{itern}").savefig(pe_filename)
+            if (itern < 250) and ((itern % 10) == 0):
+                self.get_latent_space_plot(save_plot = True)
+            elif (self.args.save_plots) and ((itern % self.args.plot_interval) == 0):
+                self.get_latent_space_plot(save_plot = True)
+
 
     def checkpoint_logic(self, test_report, train_report):
         '''
@@ -236,7 +236,7 @@ class Trainer:
         for key in result_dd.keys():
             value = sum(result_dd[key]) / len(result_dd[key])
             result[key] = round(value, 3)
-        result['elapsed'] = elapsed
+        result['elapsed'] = round(elapsed, 3)
 
         return result
 
@@ -325,7 +325,63 @@ class Trainer:
     def write_tensorboard(self, report: dict):
         for key in report.keys():
             self.writer.add_scalar(key, report[key], self.args.curr_iter)
-            
+    
+    @staticmethod
+    def _get_ellipse(mu, std, multiplier):
+        # util method to plot std_dev ellipses
+        if multiplier == 1:
+            color = 'r'; alpha = 0.9
+        elif multiplier == 2:
+            color = 'g'; alpha = 0.6
+        elif multiplier == 3:
+            color = 'b'; alpha = 0.3
+        else:
+            raise Exception('Exceeded multiplier value. Should be one of [1, 2, 3]')
+        return Ellipse(xy=(mu[0], mu[1]), 
+                    width=multiplier*std[0], 
+                    height=multiplier*std[1], 
+                    edgecolor=color, 
+                    linewidth=0.5,
+                    alpha = alpha,
+                    fc='None')
+        
+    def get_latent_space_plot(self, save_plot=True, tensorboard=False):
+        num_batch = int(self.args.n_samples_visualize / self.args.test_batch_sz) + 1
+        mu = []; log_var = []
+        for _ in range(num_batch):
+            images, _ = next(iter(self.te_dataloader))
+            images = images.to(self.args.dtype).to(self.args.device)
+            with torch.no_grad():
+                m, lv = self.model.encode(images)
+            mu.append(m); log_var.append(lv)
+
+        mu = torch.cat(mu, dim=0).cpu()
+        log_var = torch.cat(log_var, dim=0)
+        std = torch.sqrt(torch.exp(log_var)).cpu()
+        
+        plt.figure(figsize=(15,15))
+        ax = plt.gca(); 
+        fig = plt.gcf()
+        fig.suptitle(f"Latent Space @ Iteration{self.args.curr_iter}"); 
+        fig.tight_layout()
+        plt.xticks(ticks = list(range(-6,7)), labels = list(range(-6,7)))
+        plt.yticks(ticks = list(range(-6,7)), labels = list(range(-6,7)))
+        
+        for ix in range(self.args.n_samples_visualize):
+            mu_ix = mu[ix]; std_ix = std[ix]
+            plt.scatter(x = mu_ix[0], y = mu_ix[1], c='k', s=1)
+            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 1))
+            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 2))
+            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 3))
+            ax.spines["right"].set_visible(False)
+            ax.spines["top"].set_visible(False)
+
+        plt.close(fig)
+        if save_plot:
+            fig.savefig(self.checkpoint_path / "plots" / f"latent_space_{self.args.curr_iter}.png")
+        else:
+            return fig
+
             
 def main(    
         dataset_path,
