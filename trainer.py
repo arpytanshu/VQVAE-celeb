@@ -16,7 +16,6 @@ from torch.optim import AdamW
 
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
-from matplotlib.patches import Ellipse
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -38,9 +37,9 @@ class TrainingArgs:
     beta2: float = 0.95
     learning_rate: float = 1e-4
     min_lr: float = 1e-6
-    kld_weight: float = 0.001
+    kld_weight: float = 0.0001
     
-    max_iters: int = 10001
+    max_iters: int = 5001
 
     model_cfg: VAEConfig = VAEConfig()
 
@@ -52,7 +51,7 @@ class TrainingArgs:
     worse_report_counter: int = 0
 
     save_plots: bool = True
-    n_samples_visualize: int = 2048
+    n_samples_visualize: int = 3072
 
 
 class Trainer:
@@ -138,21 +137,24 @@ class Trainer:
             
             # log training stuff
             if (itern % self.args.log_interval) == 0:
-                self.logger.info(f"{itern=} tr_loss:{tr_rpt['train_loss']} tr_recon_loss:{tr_rpt['train_recon_loss']} tr_kld:{tr_rpt['train_kld']}")
+                self.logger.info(f"{itern=} tr_loss:{tr_rpt['train_loss']} ")
+                self.logger.info(f"tr_recon_loss:{tr_rpt['train_recon_loss']} tr_kld:{tr_rpt['train_kld']}")
             
             # log evaluation stuff + checkpoint
             if (itern % self.args.eval_iterval) == 0:
                 self.logger.info(f"Running evaluation at {itern=}...")
                 te_rpt = self.evaluate()
                 self.write_tensorboard(te_rpt)
-                self.logger.info(f"{itern=} te_loss:{te_rpt['test_loss']} te_recon_loss:{te_rpt['test_recon_loss']} te_kld:{te_rpt['test_kld']} elapsed:{te_rpt['elapsed']}")
+                self.logger.info(f"{itern=} te_loss:{te_rpt['test_loss']} elapsed:{te_rpt['elapsed']}")
+                self.logger.info(f"te_recon_loss:{te_rpt['test_recon_loss']} te_kld:{te_rpt['test_kld']}")
                 self.checkpoint_logic(te_rpt, tr_rpt)
 
             # plot stuff
-            if (itern < 250) and ((itern % 10) == 0):
-                self.get_latent_space_plot(save_plot = True)
             elif (self.args.save_plots) and ((itern % self.args.plot_interval) == 0):
-                self.get_latent_space_plot(save_plot = True)
+                self.model.get_latent_space_plot(self.te_dataloader, 
+                                                    self.args.n_samples_visualize, 
+                                                    self.args, 
+                                                    save_plot=True)
 
 
     def checkpoint_logic(self, test_report, train_report):
@@ -180,7 +182,7 @@ class Trainer:
             self.args.worse_report_counter += 1
             self.logger.info(F"Updated {self.args.worse_report_counter=}")
         
-        if self.args.worse_report_counter > 3:
+        if self.args.worse_report_counter > 5:
             self.logger.info(F"evaluation worse over multiple successive runs.")
             self.logger.info(F"Abort Training at {self.args.curr_iter=}")
             sys.exit()
@@ -326,61 +328,7 @@ class Trainer:
         for key in report.keys():
             self.writer.add_scalar(key, report[key], self.args.curr_iter)
     
-    @staticmethod
-    def _get_ellipse(mu, std, multiplier):
-        # util method to plot std_dev ellipses
-        if multiplier == 1:
-            color = 'r'; alpha = 0.9
-        elif multiplier == 2:
-            color = 'g'; alpha = 0.6
-        elif multiplier == 3:
-            color = 'b'; alpha = 0.3
-        else:
-            raise Exception('Exceeded multiplier value. Should be one of [1, 2, 3]')
-        return Ellipse(xy=(mu[0], mu[1]), 
-                    width=multiplier*std[0], 
-                    height=multiplier*std[1], 
-                    edgecolor=color, 
-                    linewidth=0.5,
-                    alpha = alpha,
-                    fc='None')
-        
-    def get_latent_space_plot(self, save_plot=True, tensorboard=False):
-        num_batch = int(self.args.n_samples_visualize / self.args.test_batch_sz) + 1
-        mu = []; log_var = []
-        for _ in range(num_batch):
-            images, _ = next(iter(self.te_dataloader))
-            images = images.to(self.args.dtype).to(self.args.device)
-            with torch.no_grad():
-                m, lv = self.model.encode(images)
-            mu.append(m); log_var.append(lv)
 
-        mu = torch.cat(mu, dim=0).cpu()
-        log_var = torch.cat(log_var, dim=0)
-        std = torch.sqrt(torch.exp(log_var)).cpu()
-        
-        plt.figure(figsize=(15,15))
-        ax = plt.gca(); 
-        fig = plt.gcf()
-        fig.suptitle(f"Latent Space @ Iteration{self.args.curr_iter}"); 
-        fig.tight_layout()
-        plt.xticks(ticks = list(range(-6,7)), labels = list(range(-6,7)))
-        plt.yticks(ticks = list(range(-6,7)), labels = list(range(-6,7)))
-        
-        for ix in range(self.args.n_samples_visualize):
-            mu_ix = mu[ix]; std_ix = std[ix]
-            plt.scatter(x = mu_ix[0], y = mu_ix[1], c='k', s=1)
-            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 1))
-            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 2))
-            ax.add_patch(self._get_ellipse(mu_ix, std_ix, 3))
-            ax.spines["right"].set_visible(False)
-            ax.spines["top"].set_visible(False)
-
-        plt.close(fig)
-        if save_plot:
-            fig.savefig(self.checkpoint_path / "plots" / f"latent_space_{self.args.curr_iter}.png")
-        else:
-            return fig
 
             
 def main(    

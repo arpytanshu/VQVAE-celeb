@@ -1,0 +1,9 @@
+fire
+numpy
+torch
+pandas
+uvicorn
+fastapi
+matplotlib
+torchvision
+transformers

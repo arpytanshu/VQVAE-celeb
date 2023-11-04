@@ -1,11 +1,15 @@
-#%%
-import torch
-from torch import nn
-import torch.nn.functional as F
 
 from typing import Tuple
 from dataclasses import dataclass
 from collections import OrderedDict
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
+from torchvision.utils import make_grid
+
 
 @dataclass
 class VAEConfig():
@@ -120,7 +124,7 @@ class VAEModel(nn.Module):
 
     
 def VAELoss(input, reconst, mu, log_var, kld_weight):
-    
+
     recons_loss = F.mse_loss(reconst, input)
 
     kld_loss = torch.mean(-0.5 * \
@@ -130,3 +134,89 @@ def VAELoss(input, reconst, mu, log_var, kld_weight):
     loss = recons_loss + (kld_weight * kld_loss)
     
     return {'loss': loss, 'recon_loss':recons_loss.detach(), 'kld':-kld_loss.detach()}
+
+
+    
+
+def get_ellipse(mu, std, multiplier):
+    # util method to plot std_dev ellipses
+    if multiplier == 1:
+        color = 'r'; alpha = 0.9
+    elif multiplier == 2:
+        color = 'g'; alpha = 0.6
+    elif multiplier == 3:
+        color = 'b'; alpha = 0.3
+    else:
+        raise Exception('Exceeded multiplier value. Should be one of [1, 2, 3]')
+    return Ellipse(xy=(mu[0], mu[1]), 
+                width=multiplier*std[0], 
+                height=multiplier*std[1], 
+                edgecolor=color, 
+                linewidth=0.5,
+                alpha = alpha,
+                fc='None')
+
+def get_latent_space_plot(dataloader, model, trainer_args, save_plot=True):    
+    num_batch = int(trainer_args.n_samples_visualize / dataloader.batch_size) + 1
+    mu = []; log_var = []
+    for _ in range(num_batch):
+        images, _ = next(iter(dataloader))
+        images = images.to(trainer_args.dtype).to(trainer_args.device)
+        with torch.no_grad():
+            m, lv = model.encode(images)
+        mu.append(m); log_var.append(lv)
+
+    mu = torch.cat(mu, dim=0).cpu()
+    log_var = torch.cat(log_var, dim=0)
+    std = torch.sqrt(torch.exp(log_var)).cpu()
+    
+    plt.figure(figsize=(15,15))
+    ax = plt.gca(); 
+    fig = plt.gcf()
+    fig.suptitle(f"Latent Space @ Iteration{trainer_args.curr_iter}"); 
+    fig.tight_layout()
+    plt.xlim(left=-7, right=+7)
+    plt.ylim(bottom=-7, top=+7)
+    
+    for ix in range(trainer_args.n_samples_visualize):
+        mu_ix = mu[ix]; std_ix = std[ix]
+        plt.scatter(x = mu_ix[0], y = mu_ix[1], c='k', s=1)
+        ax.add_patch(get_ellipse(mu_ix, std_ix, 1))
+        ax.add_patch(get_ellipse(mu_ix, std_ix, 2))
+        ax.add_patch(get_ellipse(mu_ix, std_ix, 3))
+        ax.spines["right"].set_visible(False)
+        ax.spines["top"].set_visible(False)
+
+    plt.close(fig)
+    if save_plot:
+        fig.savefig(trainer_args.checkpoint_path / "plots" / f"latent_space_{trainer_args.curr_iter}.png")
+    else:
+        return fig
+
+def get_reconstructions_plot(dataloader, model, trainer_args, save_plot=True):
+    
+    norm_stats = dataloader.dataset.get_normalize_stats()
+    M = torch.tensor(norm_stats['mean']).view(3,1,1)
+    S = torch.tensor(norm_stats['std']).view(3,1,1)
+
+    samples, _ = next(iter(dataloader))
+    samples = samples[:64]
+    
+    samples = samples.to(trainer_args.dtype).to(trainer_args.device)
+    recon, _, _, _ = model(samples)
+
+    samples_grid = make_grid(samples.cpu())
+    recon_grid = make_grid(recon.cpu())
+
+    samples_grid = (samples_grid * S) + M
+    recon_grid = (recon_grid * S) + M
+
+    plt.close(fig)
+    if save_plot:
+        fig.savefig(trainer_args.checkpoint_path / "plots" / f"latent_space_{trainer_args.curr_iter}.png")
+    else:
+        return fig
+
+    fig, axs = plt.subplots(1,2, figsize=(10, 5))
+    axs[0].imshow(samples_grid.permute(1,2,0))
+    axs[1].imshow(recon_grid.permute(1,2,0))

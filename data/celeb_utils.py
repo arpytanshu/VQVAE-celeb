@@ -1,18 +1,20 @@
 
-from pathlib import Path
-from typing import List, Tuple
-from time import perf_counter
-
+import sys
+import json
 import torch
+from typing import List
+from pathlib import Path
+from time import perf_counter
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from PIL import Image
+from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.io import read_image
-from torch.utils.data import Dataset
-from dataclasses import dataclass
 
-import sys
+from llm_requests import get_embedding
 
 @dataclass
 class CelebMeta:
@@ -37,6 +39,7 @@ class CelebMeta:
     images_pth: Path = Path('Img/img_align_celeba/')
     partitn_inf_pth: Path = Path('Eval/list_eval_partition.txt')
     attrib_inf_pth: Path = Path('Anno/list_attr_celeba.txt')
+    captions_path: Path = Path('captions.json')
     normalize_mean: tuple = (0.5061, 0.4254, 0.3828)
     normalize_std: tuple = (0.3105, 0.2903, 0.2896)
     
@@ -58,6 +61,10 @@ class CelebDataset(Dataset):
             transforms.Normalize(mean=CelebMeta.normalize_mean,
                                  std=CelebMeta.normalize_std)],
                                  )
+    
+    def get_normalize_stats(self, ):
+        return dict(mean=list(CelebMeta.normalize_mean),
+                    std=list(CelebMeta.normalize_std))
 
     def __getitem__(self, index: int):
         image = Image.open(str(self.file_list[index]))
@@ -177,3 +184,37 @@ def progress_bar(current, total, bar_length=50, text="Progress"):
     sys.stdout.write("\r{0}: [{1}] {2}% {3}".format(text, arrow + spaces, int(round(percent * 100)), abs))
     sys.stdout.flush()
 
+
+def combiner(x):
+    s = ''
+    for key in x.attribute_wise_captions.keys():
+        s += key + ' : ' + str(x.attribute_wise_captions[key]) + '\n'
+    s += 'overall summary : ' + str(x.overall_caption)
+    return s
+
+def get_caption_embedding(dataset_path: Path):
+    with open(dataset_path / CelebMeta.captions_path) as f:
+        data = json.load(f)
+    df = pd.DataFrame(data).T
+    df.reset_index(inplace=True)
+    df.rename(columns={'index':'fname'}, inplace=True)
+
+    batch_size = 512
+    batch_count = len(df) // batch_size
+    batch_remainder = len(df) % batch_size
+    batch_count += 1 if batch_remainder > 0 else 0
+
+    stacked_embeddings = []
+    for ix in range(batch_count):
+        start_ix = ix * batch_size
+        end_ix = start_ix + batch_size
+        sliced_df = df.iloc[start_ix:end_ix]
+        combined = sliced_df.apply(combiner, axis=1)
+        inputs = combined.values.tolist()
+        embeddings = get_embedding(inputs)['embedding']
+        stacked_embeddings.append(embeddings)
+        progress_bar(ix+1, batch_count)
+    
+    df.drop(columns=['attribute_wise_captions', 'overall_caption'], inplace=True)
+    df['embedding'] = np.concatenate(stacked_embeddings).tolist()
+    return df
